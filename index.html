@@ -1,0 +1,200 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Outlook AI Tagger (Free)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 2rem; max-width: 900px }
+    button { padding: 0.6rem 1rem; border-radius: 10px; border: 1px solid #ccc; cursor: pointer }
+    .msg { border: 1px solid #eee; border-radius: 12px; padding: 1rem; margin: 0.75rem 0 }
+    .small { color:#555; font-size: 0.9rem }
+    .log { white-space: pre-wrap; background:#fafafa; border:1px dashed #ccc; padding:10px; border-radius:8px; margin-top:1rem }
+  </style>
+  <script src="https://alcdn.msauth.net/browser/2.38.3/js/msal-browser.min.js" integrity="" crossorigin="anonymous"></script>
+</head>
+<body>
+  <h1>Outlook AI Tagger (Free, Browser-Only)</h1>
+  <p class="small">Signs in with Microsoft, summarizes your recent emails locally (no server), and applies Outlook categories as tags.</p>
+
+  <div id="auth">
+    <button id="signin">Sign in with Microsoft</button>
+    <button id="signout" style="display:none">Sign out</button>
+  </div>
+
+  <div id="actions" style="display:none">
+    <button id="run">Summarize + Tag last 20 emails</button>
+  </div>
+
+  <div id="results"></div>
+  <div class="log" id="log"></div>
+
+<script>
+const msalConfig = {
+  auth: {
+    clientId: "YOUR_CLIENT_ID",
+    authority: "https://login.microsoftonline.com/common", // or your tenant
+    redirectUri: window.location.origin + window.location.pathname
+  },
+  cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false }
+};
+const loginRequest = {
+  scopes: [
+    "User.Read",
+    "Mail.ReadWrite",          // read & update mail (apply categories)
+    "MailboxSettings.ReadWrite"// manage master categories
+  ]
+};
+
+const msalInstance = new msal.PublicClientApplication(msalConfig);
+let account = null;
+
+const log = (msg) => document.getElementById("log").textContent += `\n${msg}`;
+const show = (sel, yes) => document.querySelector(sel).style.display = yes ? "" : "none";
+
+async function signIn() {
+  try {
+    const resp = await msalInstance.loginPopup(loginRequest);
+    account = resp.account;
+    msalInstance.setActiveAccount(account);
+    show("#signin", false); show("#signout", true); show("#actions", true);
+    log("Signed in as: " + account.username);
+  } catch (e) {
+    console.error(e); log("Sign-in error: " + e.toString());
+  }
+}
+async function signOut() {
+  const active = msalInstance.getActiveAccount();
+  if (!active) return;
+  await msalInstance.logoutPopup({ account: active });
+  account = null;
+  show("#signin", true); show("#signout", false); show("#actions", false);
+  document.getElementById("results").innerHTML = "";
+  log("Signed out.");
+}
+
+async function getToken() {
+  try {
+    const result = await msalInstance.acquireTokenSilent(loginRequest);
+    return result.accessToken;
+  } catch {
+    const result = await msalInstance.acquireTokenPopup(loginRequest);
+    return result.accessToken;
+  }
+}
+
+async function graph(path, method="GET", body=null) {
+  const token = await getToken();
+  const res = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+    method,
+    headers: {
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json"
+    },
+    body: body ? JSON.stringify(body) : null
+  });
+  if (!res.ok) throw new Error(`${method} ${path} -> ${res.status} ${await res.text()}`);
+  return await res.json().catch(() => ({}));
+}
+
+// --- Tiny, zero-dependency extractive summarizer (frequency-based) ---
+function summarize(text, maxSentences = 2) {
+  if (!text) return "";
+  const sents = text
+    .replace(/\s+/g, " ")
+    .match(/[^.!?]+[.!?]+/g) || [text];           // crude sentence split
+  const words = text.toLowerCase().match(/[a-z0-9']+/g) || [];
+  const stop = new Set("the a an of to and in is are for on with as at this that it be by from or".split(" "));
+  const freq = Object.create(null);
+  for (const w of words) if (!stop.has(w) && w.length > 2) freq[w]=(freq[w]||0)+1;
+  const score = sents.map(s => {
+    const ws = (s.toLowerCase().match(/[a-z0-9']+/g) || []);
+    return ws.reduce((acc,w)=>acc+(freq[w]||0),0)/Math.log(ws.length+3);
+  });
+  // pick top sentences keeping original order
+  const idx = score.map((v,i)=>[v,i]).sort((a,b)=>b[0]-a[0]).slice(0,maxSentences).map(x=>x[1]).sort((a,b)=>a-b);
+  return idx.map(i => sents[i].trim()).join(" ");
+}
+
+// Ensure a set of master categories exists (idempotent).
+async function ensureMasterCategories(names) {
+  const existing = await graph("/me/outlook/masterCategories?$top=200"); // list categories
+  const have = new Set((existing.value||[]).map(c => c.displayName.toLowerCase()));
+  for (const name of names) {
+    if (!have.has(name.toLowerCase())) {
+      await graph("/me/outlook/masterCategories", "POST", { displayName: name, color: "preset0" });
+      log(`Created category: ${name}`);
+    }
+  }
+}
+
+// Apply categories to a message
+async function tagMessage(messageId, cats) {
+  await graph(`/me/messages/${messageId}`, "PATCH", { categories: cats });
+}
+
+// Get recent emails efficiently (no huge bodies)
+async function getRecentEmails(count=20) {
+  const data = await graph(`/me/messages?$select=id,subject,from,receivedDateTime,bodyPreview&$orderby=receivedDateTime desc&$top=${count}`);
+  return data.value || [];
+}
+
+function categoryForSummary(s) {
+  // Turn a short summary into a stable tag like: "AI: Invoice", "AI: Recruiting", etc.
+  const keywords = [
+    ["invoice","billing","payment","receipt","quote","po","purchase", "due"],
+    ["meeting","schedule","calendar","call","invite","sync","reschedule"],
+    ["job","candidate","resume","recruit","hiring","interview","role"],
+    ["shipping","order","delivery","tracking","fulfill","return"],
+    ["report","weekly","status","update","memo","summary"],
+    ["security","password","mfa","alert","phish","risk","breach"]
+  ];
+  const names = ["AI: Finance","AI: Meetings","AI: Recruiting","AI: Orders","AI: Reports","AI: Security"];
+  const l = s.toLowerCase();
+  for (let i=0;i<keywords.length;i++){
+    if (keywords[i].some(k => l.includes(k))) return names[i];
+  }
+  return "AI: General";
+}
+
+async function runTagger() {
+  try {
+    log("Fetching recent emails…");
+    const emails = await getRecentEmails(20);
+    await ensureMasterCategories(["AI: General","AI: Finance","AI: Meetings","AI: Recruiting","AI: Orders","AI: Reports","AI: Security"]);
+    const container = document.getElementById("results"); container.innerHTML = "";
+
+    for (const m of emails) {
+      const summary = summarize(m.bodyPreview || m.subject || "", 2);
+      const cat = categoryForSummary(summary || m.subject || "");
+      await tagMessage(m.id, [cat]); // overwrite for demo; in prod, merge with existing categories
+
+      const div = document.createElement("div");
+      div.className = "msg";
+      div.innerHTML = `
+        <div><strong>${(m.subject||"(no subject)").replace(/</g,"&lt;")}</strong></div>
+        <div class="small">${(m.from?.emailAddress?.name || m.from?.emailAddress?.address || "")} — ${new Date(m.receivedDateTime).toLocaleString()}</div>
+        <div style="margin-top:.5rem">${summary || "(no summary)"}</div>
+        <div class="small" style="margin-top:.5rem">Applied category: <strong>${cat}</strong></div>
+      `;
+      container.appendChild(div);
+    }
+    log("Done.");
+  } catch (e) {
+    console.error(e); log("Error: " + e.toString());
+  }
+}
+
+// UI wiring
+document.getElementById("signin").onclick = signIn;
+document.getElementById("signout").onclick = signOut;
+document.getElementById("run").onclick = runTagger;
+
+// Handle redirect flows if you host on static sites
+msalInstance.handleRedirectPromise().then((resp) => {
+  if (resp) { account = resp.account; msalInstance.setActiveAccount(account); }
+  if (msalInstance.getActiveAccount()) { show("#signin", false); show("#signout", true); show("#actions", true); }
+});
+</script>
+</body>
+</html>
