@@ -4,6 +4,10 @@
   <meta charset="utf-8" />
   <title>Outlook AI Tagger (Free)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Optional: favicon to prevent 404 -->
+  <link rel="icon" href="data:image/x-icon;base64,AAABAAEAEBAAAAAAIABoBAAAFgAAACgAAAAQAAAAIAAAAAEAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA//8AAP//AAD//wAA" />
+
   <style>
     body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 2rem; max-width: 900px }
     button { padding: 0.6rem 1rem; border-radius: 10px; border: 1px solid #ccc; cursor: pointer }
@@ -12,13 +16,15 @@
     .log { white-space: pre-wrap; background:#fafafa; border:1px dashed #ccc; padding:10px; border-radius:8px; margin-top:1rem }
   </style>
 
-  <!-- ✅ FIXED MSAL.js link -->
-  <script src="https://alcdn.msauth.net/browser/latest/js/msal-browser.min.js" crossorigin="anonymous"></script>
+  <!-- ✅ Fixed MSAL.js link -->
+  <script src="https://alcdn.msauth.net/browser/2.37.0/js/msal-browser.min.js"></script>
 </head>
 
 <body>
   <h1>Outlook AI Tagger (Free, Browser-Only)</h1>
-  <p class="small">Signs in with Microsoft, summarizes your recent emails locally (no server), and applies Outlook categories as tags.</p>
+  <p class="small">
+    Signs in with Microsoft, summarizes your recent emails locally (no server), and applies Outlook categories as tags.
+  </p>
 
   <div id="auth">
     <button id="signin">Sign in with Microsoft</button>
@@ -36,9 +42,9 @@
   // ---- MSAL CONFIG ----
   const msalConfig = {
     auth: {
-      clientId: "a8efbce3-6fab-4306-bc6e-c9cf96b41400", // ✅ your app's Client ID
+      clientId: "a8efbce3-6fab-4306-bc6e-c9cf96b41400", // your Azure app's Client ID
       authority: "https://login.microsoftonline.com/common",
-      redirectUri: "https://cooperwilks0501.github.io/outlook-ai/" // ✅ explicit URL for safety
+      redirectUri: "https://cooperwilks0501.github.io/outlook-ai/" // must exactly match Azure App Registration
     },
     cache: {
       cacheLocation: "sessionStorage",
@@ -54,10 +60,16 @@
     ]
   };
 
+  console.log("MSAL version:", msal?.version || "not loaded");
   const msalInstance = new msal.PublicClientApplication(msalConfig);
   let account = null;
 
-  const log = (msg) => document.getElementById("log").textContent += `\n${msg}`;
+  const log = (msg) => {
+    const el = document.getElementById("log");
+    el.textContent += `\n${msg}`;
+    el.scrollTop = el.scrollHeight;
+  };
+
   const show = (sel, yes) => document.querySelector(sel).style.display = yes ? "" : "none";
 
   async function signIn() {
@@ -66,11 +78,13 @@
       const resp = await msalInstance.loginPopup(loginRequest);
       account = resp.account;
       msalInstance.setActiveAccount(account);
-      show("#signin", false); show("#signout", true); show("#actions", true);
-      log("Signed in as: " + account.username);
+      show("#signin", false);
+      show("#signout", true);
+      show("#actions", true);
+      log("✅ Signed in as: " + account.username);
     } catch (e) {
-      console.error(e);
-      log("Sign-in error: " + e.toString());
+      console.error("MSAL Sign-in Error:", e);
+      log("❌ Sign-in error: " + (e.errorCode || e.message));
     }
   }
 
@@ -79,7 +93,9 @@
     if (!active) return;
     await msalInstance.logoutPopup({ account: active });
     account = null;
-    show("#signin", true); show("#signout", false); show("#actions", false);
+    show("#signin", true);
+    show("#signout", false);
+    show("#actions", false);
     document.getElementById("results").innerHTML = "";
     log("Signed out.");
   }
@@ -183,10 +199,10 @@
         `;
         container.appendChild(div);
       }
-      log("Done.");
+      log("✅ Done tagging!");
     } catch (e) {
-      console.error(e);
-      log("Error: " + e.toString());
+      console.error("Run error:", e);
+      log("❌ Error: " + e.toString());
     }
   }
 
